@@ -115,6 +115,8 @@ class PEBLTransferMonitor(Gtk.Window):
 
         # Update more frequently for better responsiveness
         GLib.timeout_add(500, self.update_all)
+        # Check for USB removal every 2 seconds
+        GLib.timeout_add(2000, self.check_usb_removed)
         self.transfer_done = False
         self.decision_dialog_shown = False
         self.last_status = ""
@@ -285,10 +287,34 @@ class PEBLTransferMonitor(Gtk.Window):
 
         panel.pack_start(Gtk.Box(), True, True, 0)
 
-        # Auto-sync info
-        auto_info = Gtk.Label(label="Cloud sync runs automatically")
-        auto_info.get_style_context().add_class("info-text")
-        panel.pack_start(auto_info, False, False, 10)
+        # Sync mode buttons
+        mode_label = Gtk.Label(label="Sync Schedule:")
+        mode_label.get_style_context().add_class("info-text")
+        mode_label.set_xalign(0)
+        panel.pack_start(mode_label, False, False, 5)
+
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mode_box.set_halign(Gtk.Align.CENTER)
+
+        self.btn_24hr = Gtk.Button(label="24hr")
+        self.btn_24hr.get_style_context().add_class("small-btn")
+        self.btn_24hr.connect("clicked", self.on_sync_mode_24hr)
+        mode_box.pack_start(self.btn_24hr, False, False, 0)
+
+        self.btn_night = Gtk.Button(label="Night")
+        self.btn_night.get_style_context().add_class("small-btn")
+        self.btn_night.connect("clicked", self.on_sync_mode_night)
+        mode_box.pack_start(self.btn_night, False, False, 0)
+
+        self.btn_custom = Gtk.Button(label="Custom")
+        self.btn_custom.get_style_context().add_class("small-btn")
+        self.btn_custom.connect("clicked", self.on_sync_mode_custom)
+        mode_box.pack_start(self.btn_custom, False, False, 0)
+
+        panel.pack_start(mode_box, False, False, 5)
+
+        # Update button styles based on current mode
+        self.update_sync_mode_buttons()
 
     def on_minimize(self, btn):
         self.unfullscreen()
@@ -296,6 +322,80 @@ class PEBLTransferMonitor(Gtk.Window):
 
     def on_close(self, btn):
         Gtk.main_quit()
+
+    def update_sync_mode_buttons(self):
+        """Update button styles to show active mode"""
+        mode = self.config.get("mode", "24hr")
+
+        # Reset all buttons to default style
+        for btn in [self.btn_24hr, self.btn_night, self.btn_custom]:
+            btn.get_style_context().remove_class("btn-primary")
+            btn.get_style_context().add_class("small-btn")
+
+        # Highlight active mode
+        if mode == "24hr":
+            self.btn_24hr.get_style_context().add_class("btn-primary")
+        elif mode == "night":
+            self.btn_night.get_style_context().add_class("btn-primary")
+        else:  # scheduled/custom
+            self.btn_custom.get_style_context().add_class("btn-primary")
+
+    def on_sync_mode_24hr(self, btn):
+        """Set 24hr sync mode (always on)"""
+        self.config["mode"] = "24hr"
+        save_config(self.config)
+        self.update_sync_mode_buttons()
+
+    def on_sync_mode_night(self, btn):
+        """Set night sync mode (10pm - 6am)"""
+        self.config["mode"] = "night"
+        self.config["start_hour"] = 22
+        self.config["end_hour"] = 6
+        save_config(self.config)
+        self.update_sync_mode_buttons()
+
+    def on_sync_mode_custom(self, btn):
+        """Show custom time picker dialog"""
+        dialog = Gtk.Dialog(title="Custom Sync Schedule", transient_for=self, modal=True)
+        dialog.set_default_size(300, 200)
+        box = dialog.get_content_area()
+        box.set_spacing(15)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        box.set_margin_top(20)
+
+        # Start time
+        start_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        start_box.pack_start(Gtk.Label(label="Start time:"), False, False, 0)
+        start_spin = Gtk.SpinButton.new_with_range(0, 23, 1)
+        start_spin.set_value(self.config.get("start_hour", 22))
+        start_box.pack_start(start_spin, False, False, 0)
+        start_box.pack_start(Gtk.Label(label=":00"), False, False, 0)
+        box.pack_start(start_box, False, False, 0)
+
+        # End time
+        end_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        end_box.pack_start(Gtk.Label(label="End time:"), False, False, 0)
+        end_spin = Gtk.SpinButton.new_with_range(0, 23, 1)
+        end_spin.set_value(self.config.get("end_hour", 6))
+        end_box.pack_start(end_spin, False, False, 0)
+        end_box.pack_start(Gtk.Label(label=":00"), False, False, 0)
+        box.pack_start(end_box, False, False, 0)
+
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+
+        dialog.show_all()
+        response = dialog.run()
+
+        if response == Gtk.ResponseType.OK:
+            self.config["mode"] = "scheduled"
+            self.config["start_hour"] = int(start_spin.get_value())
+            self.config["end_hour"] = int(end_spin.get_value())
+            save_config(self.config)
+            self.update_sync_mode_buttons()
+
+        dialog.destroy()
 
     def on_cancel(self, btn):
         """Cancel the current transfer"""
@@ -684,13 +784,35 @@ class PEBLTransferMonitor(Gtk.Window):
         now = datetime.now()
         mode = self.config.get("mode", "scheduled")
 
+        # Remove previous mode styling
+        self.sync_mode_label.get_style_context().remove_class("mode-24hr")
+        self.sync_schedule.get_style_context().remove_class("sync-active")
+
         if mode == "24hr":
             self.sync_mode_label.set_text("24HR MODE - Always Syncing")
             self.sync_mode_label.get_style_context().add_class("mode-24hr")
             self.sync_schedule.set_text("Continuous sync enabled")
-        else:
-            self.sync_mode_label.set_text("Scheduled Mode")
-            self.sync_mode_label.get_style_context().remove_class("mode-24hr")
+        elif mode == "night":
+            self.sync_mode_label.set_text("Night Mode")
+            start = 22  # 10pm
+            end = 6     # 6am
+            in_window = now.hour >= start or now.hour < end
+
+            if in_window:
+                self.sync_schedule.set_text("Sync active (10pm - 6am)")
+                self.sync_schedule.get_style_context().add_class("sync-active")
+            else:
+                next_sync = now.replace(hour=start, minute=0)
+                if now.hour >= end:
+                    pass
+                else:
+                    next_sync += timedelta(days=1)
+                delta = next_sync - now
+                h = int(delta.total_seconds() // 3600)
+                m = int((delta.total_seconds() % 3600) // 60)
+                self.sync_schedule.set_text(f"Sync starts at 10pm (in {h}h {m}m)")
+        else:  # scheduled/custom
+            self.sync_mode_label.set_text("Custom Schedule")
 
             start = self.config.get("start_hour", 22)
             end = self.config.get("end_hour", 6)
@@ -739,23 +861,57 @@ class PEBLTransferMonitor(Gtk.Window):
                 self.sync_stats.set_text(f"Last: {last}")
 
     def on_eject(self, btn):
+        # Unmount all USB drives
         subprocess.run(["bash", "-c",
             "for d in /media/pebl/*; do sudo umount \"$d\" 2>/dev/null; done"])
-        try:
-            os.remove(STATUS_FILE)
-            os.remove(PROGRESS_FILE)
-        except:
-            pass
+        subprocess.run(["sudo", "umount", "/media/usb-source"], capture_output=True)
 
-        dialog = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK,
-            text="USB safely ejected!"
-        )
-        dialog.run()
-        dialog.destroy()
+        # Clear status files
+        subprocess.run(["sudo", "rm", "-f", STATUS_FILE, PROGRESS_FILE, "/tmp/usb-transfer.lock"], capture_output=True)
+
+        # Reset UI state
         self.transfer_done = False
+        self.decision_dialog_shown = False
+
+        # Show "USB ejected" message briefly, then reset
+        self.status_text.set_text("USB Ejected - Safe to Remove")
+        self.message_label.set_text("Remove the USB drive, then insert a new one to backup")
+        self.eject_btn.set_sensitive(False)
+
+        # Schedule reset to waiting state after 3 seconds
+        GLib.timeout_add(3000, self.reset_to_waiting)
+
+    def reset_to_waiting(self):
+        """Reset UI to waiting for USB state"""
+        self.clear_style_classes()
+        self.status_text.set_text("Insert USB drive to start backup")
+        self.progress.set_fraction(0)
+        self.progress.set_text("0%")
+        self.message_label.set_text("Waiting for USB...")
+        self.file_info.set_text("")
+        self.file_types.set_text("")
+        self.current_file_label.set_text("")
+        self.speed_label.set_text("")
+        self.eject_btn.set_sensitive(False)
+        self.cancel_btn.hide()
+        self.transfer_done = False
+        return False  # Don't repeat
+
+    def check_usb_removed(self):
+        """Check if USB was physically removed and reset UI"""
+        # Only check when transfer is done (complete/failed/cancelled)
+        if self.transfer_done:
+            # Check if any USB storage is still connected
+            result = subprocess.run(
+                ["bash", "-c", "lsblk -d -o NAME,TRAN 2>/dev/null | grep usb | grep -v sda"],
+                capture_output=True, text=True
+            )
+            # If no USB found (other than the HDD on sda), reset
+            if not result.stdout.strip():
+                # Clear status files
+                subprocess.run(["sudo", "rm", "-f", STATUS_FILE, PROGRESS_FILE, "/tmp/usb-transfer.lock"], capture_output=True)
+                self.reset_to_waiting()
+        return True  # Keep checking
 
 
 if __name__ == "__main__":
