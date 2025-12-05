@@ -1,0 +1,13 @@
+# USB Auto-Transfer Rule
+# Triggers transfer script when USB storage device is inserted
+# Uses systemd-run to run in proper context (udev RUN is restricted)
+# Excludes the external HDD (Elements SE) which is the destination drive
+
+# Skip the external HDD (destination drive)
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="Elements SE", GOTO="usb_transfer_end"
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="Elements_SE", GOTO="usb_transfer_end"
+
+# Trigger transfer for other USB storage devices
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_USB_DRIVER}=="usb-storage", ENV{DEVTYPE}=="partition", RUN+="/usr/bin/systemd-run --no-block /opt/usb-transfer/on-usb-insert.sh %k %E{ID_FS_LABEL}"
+
+LABEL="usb_transfer_end"

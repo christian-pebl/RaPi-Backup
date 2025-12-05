@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=USB Transfer Monitor
+Comment=Monitor USB transfers and Google Drive sync
+Exec=/usr/bin/python3 /opt/usb-transfer/transfer-gui.py
+Icon=drive-removable-media
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true

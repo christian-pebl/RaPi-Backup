@@ -1,0 +1,17 @@
+[Unit]
+Description=USB Transfer Status Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=pebl
+Group=pebl
+WorkingDirectory=/opt/usb-transfer
+ExecStart=/usr/bin/python3 /opt/usb-transfer/status-server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
