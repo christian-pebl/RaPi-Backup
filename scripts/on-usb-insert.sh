@@ -10,6 +10,7 @@ LOG_FILE="/var/log/usb-transfer/transfer.log"
 STATUS_FILE="/tmp/usb-transfer-status"
 PROGRESS_FILE="/tmp/usb-transfer-progress.json"
 DECISION_FILE="/tmp/usb-transfer-decision"
+DEVICE_REF_FILE="/tmp/usb-device-reference"
 LOCK_FILE="/tmp/usb-transfer.lock"
 
 # Logging function
@@ -65,16 +66,23 @@ get_file_types() {
     fi
 }
 
-# Check for existing files
+# Check for existing files and optionally create exclude list
+EXCLUDE_FILE="/tmp/usb-transfer-exclude.txt"
+
 check_existing_files() {
     local source_dir="$1"
     local dest_base="$2"
     local count=0
 
+    # Clear exclude file
+    > "$EXCLUDE_FILE"
+
     while IFS= read -r -d '' file; do
         local filename=$(basename "$file")
         if find "$dest_base" -name "$filename" -type f 2>/dev/null | grep -q .; then
             ((count++))
+            # Add to exclude list (just the filename, rsync will match anywhere)
+            echo "$filename" >> "$EXCLUDE_FILE"
         fi
     done < <(find "$source_dir" -type f -print0 2>/dev/null)
 
@@ -103,6 +111,7 @@ touch "$LOCK_FILE"
 cleanup() {
     rm -f "$LOCK_FILE"
     rm -f "$DECISION_FILE"
+    rm -f "$DEVICE_REF_FILE"
 }
 trap cleanup EXIT
 
@@ -241,6 +250,34 @@ FILE_TYPES=$(get_file_types "$MOUNT_POINT")
 log "Found $FILE_COUNT files ($TOTAL_SIZE)"
 update_progress 0 0 "$FILE_COUNT" "--" "--" "$FILE_TYPES" "scanning" 0 "Found $FILE_COUNT files ($TOTAL_SIZE)"
 
+# ============================================
+# WAIT FOR DEVICE REFERENCE FROM USER
+# ============================================
+log "Waiting for user to enter device reference..."
+echo "PENDING_NAME" > "$STATUS_FILE"
+update_progress 0 0 "$FILE_COUNT" "--" "--" "$FILE_TYPES" "pending_name" 0 "Enter device reference name"
+
+rm -f "$DEVICE_REF_FILE"
+
+TIMEOUT=300
+ELAPSED=0
+while [ ! -f "$DEVICE_REF_FILE" ] && [ $ELAPSED -lt $TIMEOUT ]; do
+    sleep 1
+    ((ELAPSED++))
+done
+
+if [ ! -f "$DEVICE_REF_FILE" ]; then
+    log "Timeout waiting for device reference. Using default: $LABEL"
+    DEVICE_REF="$LABEL"
+else
+    DEVICE_REF=$(cat "$DEVICE_REF_FILE" | tr -d '\n' | tr ' ' '_' | tr -cd '[:alnum:]_-')
+    if [ -z "$DEVICE_REF" ]; then
+        DEVICE_REF="$LABEL"
+    fi
+fi
+
+log "Device reference: $DEVICE_REF"
+
 # Check for existing files
 log "Checking for existing files on HDD..."
 echo "CHECKING" > "$STATUS_FILE"
@@ -289,23 +326,30 @@ if [ "$EXISTING_COUNT" -gt 0 ]; then
     log "User decision: $DECISION"
 fi
 
-# Create destination folder with timestamp
+# Create destination folder with device reference and timestamp
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-DEST_FOLDER="$DEST_DIR/${LABEL}_${TIMESTAMP}"
+DEST_FOLDER="$DEST_DIR/${DEVICE_REF}_${TIMESTAMP}"
 mkdir -p "$DEST_FOLDER"
 
 log "Starting transfer: $TOTAL_SIZE ($FILE_COUNT files) to $DEST_FOLDER"
 
 # Update status - transferring
+# Calculate actual files to transfer (excluding skipped duplicates)
+FILES_TO_TRANSFER=$FILE_COUNT
+if [ "$DECISION" = "skip" ] && [ "$EXISTING_COUNT" -gt 0 ]; then
+    FILES_TO_TRANSFER=$((FILE_COUNT - EXISTING_COUNT))
+    log "Skip mode: Will transfer $FILES_TO_TRANSFER new files (skipping $EXISTING_COUNT duplicates)"
+fi
+
 echo "TRANSFERRING" > "$STATUS_FILE"
-update_progress 0 0 "$FILE_COUNT" "Starting..." "--" "$FILE_TYPES" "transferring" 0 "Starting file transfer..."
-/opt/usb-transfer/notify-user.sh "Transfer Started" "Copying $TOTAL_SIZE from $LABEL..."
+update_progress 0 0 "$FILES_TO_TRANSFER" "Starting..." "--" "$FILE_TYPES" "transferring" 0 "Starting file transfer..."
+/opt/usb-transfer/notify-user.sh "Transfer Started" "Copying $FILES_TO_TRANSFER files from $LABEL..."
 
 # Build rsync options
 RSYNC_OPTS="-avh --progress --info=progress2"
-if [ "$DECISION" = "skip" ]; then
-    RSYNC_OPTS="$RSYNC_OPTS --ignore-existing"
-    log "Using skip mode (--ignore-existing)"
+if [ "$DECISION" = "skip" ] && [ -s "$EXCLUDE_FILE" ]; then
+    RSYNC_OPTS="$RSYNC_OPTS --exclude-from=$EXCLUDE_FILE"
+    log "Using skip mode with exclude list ($EXISTING_COUNT files)"
 fi
 
 # Transfer with rsync - capture current file
@@ -328,7 +372,7 @@ while IFS= read -r line; do
             LAST_UPDATE=$NOW
             SPEED=$(echo "$line" | grep -oP '\d+\.\d+[KMG]B/s' | tail -1)
             ETA=$(echo "$line" | grep -oP '\d+:\d+:\d+' | tail -1)
-            FILES_DONE=$((FILE_COUNT * PCT / 100))
+            FILES_DONE=$((FILES_TO_TRANSFER * PCT / 100))
 
             # Truncate filename for display
             DISPLAY_FILE="${CURRENT_FILE:0:40}"
@@ -336,7 +380,7 @@ while IFS= read -r line; do
                 DISPLAY_FILE="${DISPLAY_FILE}..."
             fi
 
-            update_progress "$PCT" "$FILES_DONE" "$FILE_COUNT" "${SPEED:-calculating...}" "${ETA:---}" "$FILE_TYPES" "transferring" 0 "Copying: $DISPLAY_FILE ($PCT%)" "$CURRENT_FILE"
+            update_progress "$PCT" "$FILES_DONE" "$FILES_TO_TRANSFER" "${SPEED:-calculating...}" "${ETA:---}" "$FILE_TYPES" "transferring" 0 "Copying: $DISPLAY_FILE ($PCT%)" "$CURRENT_FILE"
         fi
     fi
 done
@@ -351,15 +395,22 @@ if [ $RSYNC_EXIT -eq 0 ] || [ $RSYNC_EXIT -eq 23 ]; then
     TRANSFERRED_COUNT=$(find "$DEST_FOLDER" -type f 2>/dev/null | wc -l)
     log "Verified: $TRANSFERRED_COUNT files transferred"
 
-    update_progress 100 "$TRANSFERRED_COUNT" "$FILE_COUNT" "Done" "0:00:00" "$FILE_TYPES" "complete" 0 "Transfer complete! $TRANSFERRED_COUNT files copied"
+    # Build completion message
+    if [ "$DECISION" = "skip" ] && [ "$EXISTING_COUNT" -gt 0 ]; then
+        COMPLETE_MSG="Transfer complete! $TRANSFERRED_COUNT new files copied ($EXISTING_COUNT skipped)"
+    else
+        COMPLETE_MSG="Transfer complete! $TRANSFERRED_COUNT files copied"
+    fi
+
+    update_progress 100 "$TRANSFERRED_COUNT" "$FILES_TO_TRANSFER" "Done" "0:00:00" "$FILE_TYPES" "complete" 0 "$COMPLETE_MSG"
 
     sync
     log "Transfer complete. Safe to remove USB."
-    /opt/usb-transfer/notify-user.sh "Transfer Complete" "Safe to remove USB ($LABEL). Transferred: $TOTAL_SIZE ($TRANSFERRED_COUNT files)"
+    /opt/usb-transfer/notify-user.sh "Transfer Complete" "Safe to remove USB ($LABEL). $COMPLETE_MSG"
 else
     log "ERROR: Transfer failed with exit code $RSYNC_EXIT"
     echo "FAILED" > "$STATUS_FILE"
-    update_progress 0 0 "$FILE_COUNT" "--" "--" "$FILE_TYPES" "failed" 0 "Transfer failed (error code $RSYNC_EXIT)"
+    update_progress 0 0 "$FILES_TO_TRANSFER" "--" "--" "$FILE_TYPES" "failed" 0 "Transfer failed (error code $RSYNC_EXIT)"
     /opt/usb-transfer/notify-user.sh "Transfer Failed" "Error copying from $LABEL. Check logs."
 fi
 
